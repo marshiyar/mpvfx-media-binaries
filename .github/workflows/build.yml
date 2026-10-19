@@ -170,6 +170,10 @@ jobs:
           cargo test --workspace -q --locked >/dev/null 2>&1 || { echo "::error::Tests failed; reproduce in a private session"; exit 1; }
           echo "tests passed"
       - name: Package
+        env:
+          # The published libraries carry no symbols on any OS: no ELF .symtab/.debug_*, no CodeView (.pdb) record in
+          # the DLL, no Mach-O stabs. The app's strip-check workflow reads every shipped binary's headers.
+          CARGO_PROFILE_RELEASE_STRIP: symbols
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' src/mpvfx-media-processing/crates/Cargo.toml | head -1)
           if [ "$GITHUB_EVENT_NAME" = push ] && [ "v$version" != "v${GITHUB_REF_NAME#*-v}" ]; then
