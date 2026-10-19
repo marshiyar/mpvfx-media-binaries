@@ -5,7 +5,8 @@ name: build
 #   Run manually (workflow_dispatch): component, the source commit, and whether to publish.
 #   Push a tag media-v<version> or keyframes-v<version>: builds the source tag v<version> and publishes.
 # Nothing here runs for pull requests, so no pull request can reach the secrets. The source tokens are read-only
-# (ENGINE_SOURCE_TOKEN, KEYFRAMES_SOURCE_TOKEN), never stored in a checkout, and the checkout is deleted when a job
+# (ENGINE_SOURCE_TOKEN, KEYFRAMES_SOURCE_TOKEN) environment secrets of `build-host`, which only main and the
+# media-v*/keyframes-v* tags may use; they are never stored in a checkout, and the checkout is deleted when a job
 # ends. Logs stay short: a failing step prints its name only.
 
 run-name: ${{ github.event_name == 'workflow_dispatch' && format('{0} {1}', inputs.component, inputs.ref) || github.ref_name }}
@@ -59,6 +60,7 @@ jobs:
           IN_PUBLISH: ${{ inputs.publish }}
         run: |
           if [ "$EVENT" = workflow_dispatch ]; then
+            [ "$GITHUB_REF" = refs/heads/main ] || { echo "::error::run this workflow from main"; exit 1; }
             component="$IN_COMPONENT"; ref="$IN_REF"; publish="$IN_PUBLISH"
             [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::ref must be a full commit sha"; exit 1; }
           else
@@ -89,6 +91,8 @@ jobs:
           - os: windows-2022
             name: windows-x86_64
     runs-on: ${{ matrix.os }}
+    # The source token is an environment secret; the environment admits main and the release tags only.
+    environment: build-host
     timeout-minutes: 60
     defaults:
       run:
