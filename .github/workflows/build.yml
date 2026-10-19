@@ -169,6 +169,32 @@ jobs:
         run: |
           cargo test --workspace -q --locked >/dev/null 2>&1 || { echo "::error::Tests failed; reproduce in a private session"; exit 1; }
           echo "tests passed"
+      # Known vulnerabilities in the engine's few third-party crates (OSV database). The scanner writes JSON to a
+      # file; only the count and the OSV ids reach this public log, never a crate name or version.
+      - name: Dependency vulnerabilities (OSV)
+        id: osv
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        with:
+          scan-args: |-
+            --lockfile=src/mpvfx-media-processing/crates/Cargo.lock
+            --format=json
+            --output=${{ runner.temp }}/osv.json
+      - name: Vulnerability ids
+        env:
+          OSV: ${{ runner.temp }}/osv.json
+        run: |
+          python3 - "$OSV" <<'PY'
+          import json, sys
+          try:
+              r = json.load(open(sys.argv[1]))
+          except (OSError, ValueError):
+              print("::error::OSV: no result file; the scan did not run"); sys.exit(1)
+          ids = sorted({v["id"] for res in r.get("results", []) for p in res.get("packages", []) for v in p.get("vulnerabilities", [])})
+          print(f"OSV: {len(ids)} known vulnerabilities in the dependency set")
+          for i in ids: print(f"::error::OSV {i} (https://osv.dev/{i})")
+          sys.exit(1 if ids else 0)
+          PY
       - name: Package
         env:
           # The published libraries carry no symbols on any OS: no ELF .symtab/.debug_*, no CodeView (.pdb) record in
