@@ -129,6 +129,21 @@ jobs:
             git -C src -c advice.detachedHead=false checkout -q --detach FETCH_HEAD; } >/dev/null 2>&1 \
             || { echo "::error::Source failed; reproduce in a private session"; exit 1; }
           echo "source checked out"
+      # Only when Source fails: whether each expected name is set, as true/false evaluated by GitHub (no value ever
+      # reaches the runner), so a missing secret, one saved as a variable, or a misspelt name shows in the log.
+      - name: Which source settings are set
+        if: failure()
+        env:
+          SECRET_MEDIA_SOURCE_REPO: ${{ secrets.MEDIA_SOURCE_REPO != '' }}
+          VAR_MEDIA_SOURCE_REPO: ${{ vars.MEDIA_SOURCE_REPO != '' }}
+          SECRET_ENGINE_SOURCE_REPO: ${{ secrets.ENGINE_SOURCE_REPO != '' }}
+          SECRET_MEDIA_SOURCE_REPOSITORY: ${{ secrets.MEDIA_SOURCE_REPOSITORY != '' }}
+          SECRET_ENGINE_SOURCE_TOKEN: ${{ secrets.ENGINE_SOURCE_TOKEN != '' }}
+          SECRET_KEYFRAMES_SOURCE_REPO: ${{ secrets.KEYFRAMES_SOURCE_REPO != '' }}
+          SECRET_KEYFRAMES_SOURCE_TOKEN: ${{ secrets.KEYFRAMES_SOURCE_TOKEN != '' }}
+        run: |
+          echo "environment: build-host, ref: $GITHUB_REF"
+          env | grep -E '^(SECRET|VAR)_' | sort
       - name: Rust
         working-directory: src/mpvfx-media-processing/crates
         run: |
