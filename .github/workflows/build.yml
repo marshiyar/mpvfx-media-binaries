@@ -164,7 +164,10 @@ jobs:
           COMPONENT: ${{ needs.plan.outputs.component }}
         run: |
           [ "$(ls | wc -l)" -eq 3 ] || { echo "::error::expected three packages"; exit 1; }
-          version=$(ls | head -1 | sed -E 's/^mpvfx-media-([0-9][^-]*)-.*/\1/')
+          # The version is everything between the name and the platform suffix, prerelease part included.
+          versions=$(ls | sed -E 's/^mpvfx-media-(.+)-(macos|linux|windows)-(arm64|x86_64)\.(tar\.gz|zip)$/\1/' | sort -u)
+          [ "$(printf '%s\n' "$versions" | wc -l)" -eq 1 ] || { echo "::error::packages disagree on the version"; exit 1; }
+          version="$versions"
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
           echo "tag=$COMPONENT-v$version" >> "$GITHUB_OUTPUT"
