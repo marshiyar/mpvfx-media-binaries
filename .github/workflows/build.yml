@@ -195,7 +195,8 @@ jobs:
     needs: plan
     if: needs.plan.outputs.component == 'keyframes'
     strategy:
-      fail-fast: true
+      # Every platform runs to the end, so one run shows each platform's result.
+      fail-fast: false
       matrix:
         include:
           - os: xcode-27
@@ -269,15 +270,25 @@ jobs:
           swift-build: 6.3.3-RELEASE
       - name: Toolchain
         run: clang --version | head -1
+      # The scripts print one line per failed stage or check (BUILD-FAIL: <stage>, LINKTEST-FAIL: <check> [<count>]),
+      # never a path, symbol or string; only lines of exactly that form reach this log.
       - name: Build
         run: |
-          bash src/release/build.sh "$VERSION" src/build >/dev/null 2>&1 \
-            || { echo "::error::Build failed; reproduce in a private session"; exit 1; }
+          if ! bash src/release/build.sh "$VERSION" src/build > "$RUNNER_TEMP/kf.log" 2>/dev/null; then
+            grep -E '^BUILD-FAIL: [a-z-]+( [0-9]+)?$' "$RUNNER_TEMP/kf.log" || true
+            rm -f "$RUNNER_TEMP/kf.log"
+            echo "::error::Build failed; reproduce in a private session"; exit 1
+          fi
+          rm -f "$RUNNER_TEMP/kf.log"
           echo "built"
       - name: Link test
         run: |
-          bash src/release/link-test.sh src/build "$VERSION" >/dev/null 2>&1 \
-            || { echo "::error::Link test failed; reproduce in a private session"; exit 1; }
+          if ! bash src/release/link-test.sh src/build "$VERSION" > "$RUNNER_TEMP/kf.log" 2>/dev/null; then
+            grep -E '^LINKTEST-FAIL: [a-z-]+( [0-9]+)?$' "$RUNNER_TEMP/kf.log" || true
+            rm -f "$RUNNER_TEMP/kf.log"
+            echo "::error::Link test failed; reproduce in a private session"; exit 1
+          fi
+          rm -f "$RUNNER_TEMP/kf.log"
           echo "link test passed: exports, dependencies, no debug information, no paths"
       - name: Package
         run: |
@@ -296,7 +307,7 @@ jobs:
           retention-days: 1
       - name: Delete the source checkout
         if: always()
-        run: rm -rf src dist
+        run: rm -rf src dist "$RUNNER_TEMP/kf.log"
 
   publish:
     needs: [plan, media, keyframes]
