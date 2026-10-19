@@ -7,7 +7,9 @@ name: build
 # Nothing here runs for pull requests, so no pull request can reach the secrets. The source tokens are read-only
 # (ENGINE_SOURCE_TOKEN, KEYFRAMES_SOURCE_TOKEN) environment secrets of `build-host`, which only main and the
 # media-v*/keyframes-v* tags may use; they are never stored in a checkout, and the checkout is deleted when a job
-# ends. Logs stay short: a failing step prints its name only.
+# ends. The source repositories are named only by the environment secrets MEDIA_SOURCE_REPO and
+# KEYFRAMES_SOURCE_REPO (owner/name), so this public file and its logs (secrets are masked) never name them. Logs stay
+# short: a failing step prints its name only.
 
 run-name: ${{ github.event_name == 'workflow_dispatch' && format('{0} {1}', inputs.component, inputs.ref) || github.ref_name }}
 
@@ -47,7 +49,6 @@ jobs:
     timeout-minutes: 5
     outputs:
       component: ${{ steps.plan.outputs.component }}
-      repository: ${{ steps.plan.outputs.repository }}
       ref: ${{ steps.plan.outputs.ref }}
       publish: ${{ steps.plan.outputs.publish }}
     steps:
@@ -68,14 +69,13 @@ jobs:
             component="${GITHUB_REF_NAME%%-v*}"; ref="v${GITHUB_REF_NAME#*-v}"; publish=true
           fi
           case "$component" in
-            media) repository=marshiyar/mpvfx-media ;;
+            media) ;;
             keyframes)
-              repository=OneTake-app/video-keyframing
               echo "::error::keyframes builds are not set up in this workflow yet"; exit 1 ;;
             *) echo "::error::unknown component"; exit 1 ;;
           esac
           {
-            echo "component=$component"; echo "repository=$repository"; echo "ref=$ref"; echo "publish=$publish"
+            echo "component=$component"; echo "ref=$ref"; echo "publish=$publish"
           } >> "$GITHUB_OUTPUT"
 
   media:
@@ -109,9 +109,10 @@ jobs:
       - name: Source
         env:
           TOKEN: ${{ secrets.ENGINE_SOURCE_TOKEN }}
-          REPO: ${{ needs.plan.outputs.repository }}
+          REPO: ${{ secrets.MEDIA_SOURCE_REPO }}
           REF: ${{ needs.plan.outputs.ref }}
         run: |
+          [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::source repository not configured"; exit 1; }
           if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then spec="$REF"; else spec="refs/tags/$REF"; fi
           basic=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
           echo "::add-mask::$basic"
