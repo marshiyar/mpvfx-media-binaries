@@ -139,7 +139,11 @@ jobs:
           SECRET_ENGINE_SOURCE_REPO: ${{ secrets.ENGINE_SOURCE_REPO != '' }}
           SECRET_MEDIA_SOURCE_REPOSITORY: ${{ secrets.MEDIA_SOURCE_REPOSITORY != '' }}
           SECRET_ENGINE_SOURCE_TOKEN: ${{ secrets.ENGINE_SOURCE_TOKEN != '' }}
-        run: env | grep -E '^(SECRET|VAR)_' | sort
+          SECRET_KEYFRAMES_SOURCE_REPO: ${{ secrets.KEYFRAMES_SOURCE_REPO != '' }}
+          SECRET_KEYFRAMES_SOURCE_TOKEN: ${{ secrets.KEYFRAMES_SOURCE_TOKEN != '' }}
+        run: |
+          echo "environment: build-host, ref: $GITHUB_REF"
+          env | grep -E '^(SECRET|VAR)_' | sort
       - name: Rust
         working-directory: src/mpvfx-media-processing/crates
         run: |
