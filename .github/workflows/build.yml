@@ -1,0 +1,190 @@
+name: build
+
+# Builds, tests and packages a library from its source repository on macOS arm64, Linux x86_64 and Windows x86_64,
+# and, when publishing, releases the packages and their SHA256SUMS in this repository.
+#   Run manually (workflow_dispatch): component, the source commit, and whether to publish.
+#   Push a tag media-v<version> or keyframes-v<version>: builds the source tag v<version> and publishes.
+# Nothing here runs for pull requests, so no pull request can reach the secrets. The source tokens are read-only
+# (ENGINE_SOURCE_TOKEN, KEYFRAMES_SOURCE_TOKEN), never stored in a checkout, and the checkout is deleted when a job
+# ends. Logs stay short: a failing step prints its name only.
+
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('{0} {1}', inputs.component, inputs.ref) || github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Library to build
+        type: choice
+        options: [media, keyframes]
+        required: true
+      ref:
+        description: Source commit (full sha)
+        type: string
+        required: true
+      publish:
+        description: Publish a release in this repository
+        type: boolean
+        default: false
+  push:
+    tags: ['media-v*', 'keyframes-v*']
+
+concurrency:
+  group: build-${{ github.event_name == 'workflow_dispatch' && format('{0}-{1}', inputs.component, inputs.ref) || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # Library kind for media packages: dynamic (published) or static.
+  MEDIA_LIB_KIND: dynamic
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      component: ${{ steps.plan.outputs.component }}
+      repository: ${{ steps.plan.outputs.repository }}
+      ref: ${{ steps.plan.outputs.ref }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - name: Plan
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_COMPONENT: ${{ inputs.component }}
+          IN_REF: ${{ inputs.ref }}
+          IN_PUBLISH: ${{ inputs.publish }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ]; then
+            component="$IN_COMPONENT"; ref="$IN_REF"; publish="$IN_PUBLISH"
+            [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::ref must be a full commit sha"; exit 1; }
+          else
+            component="${GITHUB_REF_NAME%%-v*}"; ref="v${GITHUB_REF_NAME#*-v}"; publish=true
+          fi
+          case "$component" in
+            media) repository=marshiyar/mpvfx-media ;;
+            keyframes)
+              repository=OneTake-app/video-keyframing
+              echo "::error::keyframes builds are not set up in this workflow yet"; exit 1 ;;
+            *) echo "::error::unknown component"; exit 1 ;;
+          esac
+          {
+            echo "component=$component"; echo "repository=$repository"; echo "ref=$ref"; echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+
+  media:
+    needs: plan
+    if: needs.plan.outputs.component == 'media'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: xcode-27
+            name: macos-arm64
+          - os: ubuntu-24.04
+            name: linux-x86_64
+          - os: windows-2022
+            name: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: never
+      PUBLISH: ${{ needs.plan.outputs.publish }}
+    steps:
+      # actions/checkout v4 (the commit the v4 tag points to)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ needs.plan.outputs.repository }}
+          ref: ${{ needs.plan.outputs.ref }}
+          token: ${{ secrets.ENGINE_SOURCE_TOKEN }}
+          path: src
+          persist-credentials: false
+      - name: Rust
+        working-directory: src/mpvfx-media-processing/crates
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal --default-toolchain none >/dev/null 2>&1
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"; export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup -q toolchain install >/dev/null 2>&1 || { echo "::error::Rust failed; reproduce in a private session"; exit 1; }
+          if [ "$RUNNER_OS" = Windows ]; then rustup -q component add llvm-tools >/dev/null 2>&1; fi
+          rustc -V
+      - name: Tests
+        working-directory: src/mpvfx-media-processing/crates
+        env:
+          RUSTFLAGS: -Awarnings
+        run: |
+          cargo test --workspace -q --locked >/dev/null 2>&1 || { echo "::error::Tests failed; reproduce in a private session"; exit 1; }
+          echo "tests passed"
+      - name: Package
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' src/mpvfx-media-processing/crates/Cargo.toml | head -1)
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "v$version" != "v${GITHUB_REF_NAME#*-v}" ]; then
+            echo "::error::Package failed: the tag's version is not the source version"; exit 1
+          fi
+          bash src/release/build.sh --kind "$MEDIA_LIB_KIND" "$version" >/dev/null 2>&1 \
+            || { echo "::error::Package failed; reproduce in a private session"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/out" && mv src/dist/* "$RUNNER_TEMP/out/"
+          ls "$RUNNER_TEMP/out"
+      # actions/upload-artifact v4; only when publishing, so unreleased builds are never downloadable
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: env.PUBLISH == 'true'
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+          retention-days: 1
+      - name: Delete the source checkout
+        if: always()
+        run: rm -rf src "$RUNNER_TEMP/out"
+
+  publish:
+    needs: [plan, media]
+    if: needs.plan.outputs.publish == 'true' && needs.media.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # actions/download-artifact v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums and release notes
+        id: notes
+        working-directory: dist
+        env:
+          COMPONENT: ${{ needs.plan.outputs.component }}
+        run: |
+          [ "$(ls | wc -l)" -eq 3 ] || { echo "::error::expected three packages"; exit 1; }
+          version=$(ls | head -1 | sed -E 's/^mpvfx-media-([0-9][^-]*)-.*/\1/')
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+          echo "tag=$COMPONENT-v$version" >> "$GITHUB_OUTPUT"
+          {
+            echo "MpVFX media engine $version"
+            echo
+            echo "Platforms: macOS arm64, Linux x86_64, Windows x86_64 (MSVC)."
+            echo
+            echo "SHA-256:"
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } > "$RUNNER_TEMP/notes.md"
+      - name: Release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.notes.outputs.tag }}
+        run: |
+          # Fails when the release already exists: a published version is never replaced.
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" -- *
