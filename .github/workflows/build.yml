@@ -114,7 +114,8 @@ jobs:
         run: |
           # Accepts owner/name, also pasted as a github.com URL, with .git or surrounding whitespace; the error says
           # which of unset or malformed it is, never the value.
-          REPO="${REPO//[$'\t\r\n ']/}"; REPO="${REPO#https://github.com/}"; REPO="${REPO%/}"; REPO="${REPO%.git}"
+          REPO="${REPO#"${REPO%%[![:space:]]*}"}"; REPO="${REPO%"${REPO##*[![:space:]]}"}"   # trim the ends only
+          REPO="${REPO#https://github.com/}"; REPO="${REPO%/}"; REPO="${REPO%.git}"
           [ -n "$REPO" ] || { echo "::error::source repository not configured (MEDIA_SOURCE_REPO is empty or not set in build-host)"; exit 1; }
           [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
             || { echo "::error::source repository not configured (MEDIA_SOURCE_REPO is not in owner/name form)"; exit 1; }
