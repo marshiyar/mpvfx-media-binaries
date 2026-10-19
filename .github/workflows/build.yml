@@ -2,7 +2,8 @@ name: build
 
 # Builds, tests and packages a library from its source repository on macOS arm64, Linux x86_64 and Windows x86_64,
 # and, when publishing, releases the packages and their SHA256SUMS in this repository.
-#   Run manually (workflow_dispatch): component, the source commit, and whether to publish.
+#   Run manually (workflow_dispatch): component, the source commit, whether to publish, and for keyframes the version
+#   (keyframes sources carry no version file; media takes its version from the source).
 #   Push a tag media-v<version> or keyframes-v<version>: builds the source tag v<version> and publishes.
 # Nothing here runs for pull requests, so no pull request can reach the secrets. The source tokens are read-only
 # (ENGINE_SOURCE_TOKEN, KEYFRAMES_SOURCE_TOKEN) environment secrets of `build-host`, which only main and the
@@ -29,6 +30,10 @@ on:
         description: Publish a release in this repository
         type: boolean
         default: false
+      version:
+        description: Release version X.Y.Z (keyframes only; media reads it from the source)
+        type: string
+        required: false
   push:
     tags: ['media-v*', 'keyframes-v*']
 
@@ -51,6 +56,7 @@ jobs:
       component: ${{ steps.plan.outputs.component }}
       ref: ${{ steps.plan.outputs.ref }}
       publish: ${{ steps.plan.outputs.publish }}
+      version: ${{ steps.plan.outputs.version }}
     steps:
       - name: Plan
         id: plan
@@ -59,23 +65,25 @@ jobs:
           IN_COMPONENT: ${{ inputs.component }}
           IN_REF: ${{ inputs.ref }}
           IN_PUBLISH: ${{ inputs.publish }}
+          IN_VERSION: ${{ inputs.version }}
         run: |
           if [ "$EVENT" = workflow_dispatch ]; then
             [ "$GITHUB_REF" = refs/heads/main ] || { echo "::error::run this workflow from main"; exit 1; }
-            component="$IN_COMPONENT"; ref="$IN_REF"; publish="$IN_PUBLISH"
+            component="$IN_COMPONENT"; ref="$IN_REF"; publish="$IN_PUBLISH"; version="$IN_VERSION"
             [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::ref must be a full commit sha"; exit 1; }
           else
             [[ "$GITHUB_REF_NAME" =~ ^[a-z]+-v[0-9][0-9A-Za-z.+-]*$ ]] || { echo "::error::unexpected tag name"; exit 1; }
-            component="${GITHUB_REF_NAME%%-v*}"; ref="v${GITHUB_REF_NAME#*-v}"; publish=true
+            component="${GITHUB_REF_NAME%%-v*}"; ref="v${GITHUB_REF_NAME#*-v}"; publish=true; version="${GITHUB_REF_NAME#*-v}"
           fi
           case "$component" in
-            media) ;;
+            media) version= ;;
             keyframes)
-              echo "::error::keyframes builds are not set up in this workflow yet"; exit 1 ;;
+              [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
+                || { echo "::error::keyframes needs a version X.Y.Z (the version input when run by hand)"; exit 1; } ;;
             *) echo "::error::unknown component"; exit 1 ;;
           esac
           {
-            echo "component=$component"; echo "ref=$ref"; echo "publish=$publish"
+            echo "component=$component"; echo "ref=$ref"; echo "publish=$publish"; echo "version=$version"
           } >> "$GITHUB_OUTPUT"
 
   media:
@@ -183,9 +191,119 @@ jobs:
         if: always()
         run: rm -rf src "$RUNNER_TEMP/out"
 
+  keyframes:
+    needs: plan
+    if: needs.plan.outputs.component == 'keyframes'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: xcode-27
+            name: macos-arm64
+            container: ''
+          - os: ubuntu-24.04
+            name: linux-x86_64
+            # Swift's clang and libstdc++ on Ubuntu 24.04; only clang is used, the library has no Swift dependency.
+            container: swift:6.3.3-noble
+          - os: windows-2022
+            name: windows-x86_64
+            container: ''
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    # The source token is an environment secret; the environment admits main and the release tags only.
+    environment: build-host
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      PUBLISH: ${{ needs.plan.outputs.publish }}
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      # Same as media's Source step (see there), with the keyframes token and repository.
+      - name: Source
+        env:
+          TOKEN: ${{ secrets.KEYFRAMES_SOURCE_TOKEN }}
+          REPO: ${{ secrets.KEYFRAMES_SOURCE_REPO }}
+          REF: ${{ needs.plan.outputs.ref }}
+        run: |
+          REPO="${REPO#"${REPO%%[![:space:]]*}"}"; REPO="${REPO%"${REPO##*[![:space:]]}"}"   # trim the ends only
+          REPO="${REPO#https://github.com/}"; REPO="${REPO%/}"; REPO="${REPO%.git}"
+          [ -n "$REPO" ] || { echo "::error::source repository not configured (KEYFRAMES_SOURCE_REPO is empty or not set in build-host)"; exit 1; }
+          [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+            || { echo "::error::source repository not configured (KEYFRAMES_SOURCE_REPO is not in owner/name form)"; exit 1; }
+          [ -n "$TOKEN" ] || { echo "::error::source token not configured (KEYFRAMES_SOURCE_TOKEN is empty or not set in build-host)"; exit 1; }
+          if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then spec="$REF"; else spec="refs/tags/$REF"; fi
+          basic=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$basic"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic"
+          { git init -q src &&
+            git -C src fetch -q --depth 1 --no-tags "https://github.com/$REPO" "$spec" &&
+            git -C src -c advice.detachedHead=false checkout -q --detach FETCH_HEAD; } >/dev/null 2>&1 \
+            || { echo "::error::Source failed; reproduce in a private session"; exit 1; }
+          echo "source checked out"
+      - name: Which source settings are set
+        if: failure()
+        env:
+          SECRET_KEYFRAMES_SOURCE_REPO: ${{ secrets.KEYFRAMES_SOURCE_REPO != '' }}
+          VAR_KEYFRAMES_SOURCE_REPO: ${{ vars.KEYFRAMES_SOURCE_REPO != '' }}
+          SECRET_KEYFRAMES_SOURCE_TOKEN: ${{ secrets.KEYFRAMES_SOURCE_TOKEN != '' }}
+          VAR_KEYFRAMES_SOURCE_TOKEN: ${{ vars.KEYFRAMES_SOURCE_TOKEN != '' }}
+        run: |
+          echo "environment: build-host, ref: $GITHUB_REF"
+          env | grep -E '^(SECRET|VAR)_' | sort
+      # Toolchains: Xcode 27 on macOS, the Swift 6.3.3 container on Linux (above), Swift 6.3.3 for Windows (its clang
+      # and lld-link with the Visual Studio 2022 C++ runtime and Windows SDK). The library is built by clang alone.
+      - name: Xcode
+        if: runner.os == 'macOS'
+        run: |
+          if [ -d /Applications/Xcode_27.0.app ]; then
+            echo "DEVELOPER_DIR=/Applications/Xcode_27.0.app/Contents/Developer" >> "$GITHUB_ENV"
+          fi
+      # compnerd/gha-setup-swift (pinned commit)
+      - uses: compnerd/gha-setup-swift@775d3f4111c5be58a0f62f2efdd353bb8fac15c7
+        if: runner.os == 'Windows'
+        with:
+          swift-version: swift-6.3.3-release
+          swift-build: 6.3.3-RELEASE
+      - name: Toolchain
+        run: clang --version | head -1
+      - name: Build
+        run: |
+          bash src/release/build.sh "$VERSION" src/build >/dev/null 2>&1 \
+            || { echo "::error::Build failed; reproduce in a private session"; exit 1; }
+          echo "built"
+      - name: Link test
+        run: |
+          bash src/release/link-test.sh src/build "$VERSION" >/dev/null 2>&1 \
+            || { echo "::error::Link test failed; reproduce in a private session"; exit 1; }
+          echo "link test passed: exports, dependencies, no debug information, no paths"
+      - name: Package
+        run: |
+          rm -rf dist
+          bash src/release/package.sh "$VERSION" src/build dist >/dev/null 2>&1 \
+            || { echo "::error::Package failed; reproduce in a private session"; exit 1; }
+          [ "$(ls dist | wc -l)" -eq 1 ] || { echo "::error::Package failed: expected one archive"; exit 1; }
+          ls dist
+      # actions/upload-artifact v4; only dist/*, and only when publishing, so unreleased builds are never downloadable
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: env.PUBLISH == 'true'
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+      - name: Delete the source checkout
+        if: always()
+        run: rm -rf src dist
+
   publish:
-    needs: [plan, media]
-    if: needs.plan.outputs.publish == 'true' && needs.media.result == 'success'
+    needs: [plan, media, keyframes]
+    # One component is built per run; the other's job is skipped, so the condition names both.
+    if: >-
+      ${{ !cancelled() && needs.plan.outputs.publish == 'true' &&
+      (needs.media.result == 'success' || needs.keyframes.result == 'success') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -201,17 +319,26 @@ jobs:
         working-directory: dist
         env:
           COMPONENT: ${{ needs.plan.outputs.component }}
+          PLANNED_VERSION: ${{ needs.plan.outputs.version }}
         run: |
           [ "$(ls | wc -l)" -eq 3 ] || { echo "::error::expected three packages"; exit 1; }
+          case "$COMPONENT" in
+            media) prefix=mpvfx-media; title="MpVFX media engine" ;;
+            keyframes) prefix=video-keyframing; title="MpVFX keyframe engine (C ABI, include/cvkf.h)" ;;
+          esac
           # The version is everything between the name and the platform suffix, prerelease part included.
-          versions=$(ls | sed -E 's/^mpvfx-media-(.+)-(macos|linux|windows)-(arm64|x86_64)\.(tar\.gz|zip)$/\1/' | sort -u)
+          versions=$(ls | sed -E "s/^$prefix-(.+)-(macos|linux|windows)-(arm64|x86_64)\.(tar\.gz|zip)\$/\1/" | sort -u)
           [ "$(printf '%s\n' "$versions" | wc -l)" -eq 1 ] || { echo "::error::packages disagree on the version"; exit 1; }
           version="$versions"
+          [[ "$version" =~ ^[0-9][0-9A-Za-z.+-]*$ ]] || { echo "::error::unexpected package names"; exit 1; }
+          if [ "$COMPONENT" = keyframes ] && [ "$version" != "$PLANNED_VERSION" ]; then
+            echo "::error::packages are not version $PLANNED_VERSION"; exit 1
+          fi
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
           echo "tag=$COMPONENT-v$version" >> "$GITHUB_OUTPUT"
           {
-            echo "MpVFX media engine $version"
+            echo "$title $version"
             echo
             echo "Platforms: macOS arm64, Linux x86_64, Windows x86_64 (MSVC)."
             echo
