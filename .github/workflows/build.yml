@@ -64,6 +64,7 @@ jobs:
             component="$IN_COMPONENT"; ref="$IN_REF"; publish="$IN_PUBLISH"
             [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::ref must be a full commit sha"; exit 1; }
           else
+            [[ "$GITHUB_REF_NAME" =~ ^[a-z]+-v[0-9][0-9A-Za-z.+-]*$ ]] || { echo "::error::unexpected tag name"; exit 1; }
             component="${GITHUB_REF_NAME%%-v*}"; ref="v${GITHUB_REF_NAME#*-v}"; publish=true
           fi
           case "$component" in
@@ -101,14 +102,26 @@ jobs:
       CARGO_TERM_COLOR: never
       PUBLISH: ${{ needs.plan.outputs.publish }}
     steps:
-      # actions/checkout v4 (the commit the v4 tag points to)
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: ${{ needs.plan.outputs.repository }}
-          ref: ${{ needs.plan.outputs.ref }}
-          token: ${{ secrets.ENGINE_SOURCE_TOKEN }}
-          path: src
-          persist-credentials: false
+      # A shallow fetch of the one commit instead of actions/checkout, which logs the private commit's subject line
+      # ("HEAD is now at <sha> <subject>") into this public log. The token reaches git only through GIT_CONFIG_*
+      # variables of this step, so nothing is written to the checkout; git's own output is discarded for the same
+      # reason, and a failure prints the step name only.
+      - name: Source
+        env:
+          TOKEN: ${{ secrets.ENGINE_SOURCE_TOKEN }}
+          REPO: ${{ needs.plan.outputs.repository }}
+          REF: ${{ needs.plan.outputs.ref }}
+        run: |
+          if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then spec="$REF"; else spec="refs/tags/$REF"; fi
+          basic=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$basic"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic"
+          { git init -q src &&
+            git -C src fetch -q --depth 1 --no-tags "https://github.com/$REPO" "$spec" &&
+            git -C src -c advice.detachedHead=false checkout -q --detach FETCH_HEAD; } >/dev/null 2>&1 \
+            || { echo "::error::Source failed; reproduce in a private session"; exit 1; }
+          echo "source checked out"
       - name: Rust
         working-directory: src/mpvfx-media-processing/crates
         run: |
