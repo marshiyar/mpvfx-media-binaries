@@ -169,6 +169,41 @@ jobs:
         run: |
           cargo test --workspace -q --locked >/dev/null 2>&1 || { echo "::error::Tests failed; reproduce in a private session"; exit 1; }
           echo "tests passed"
+      # Known vulnerabilities in the engine's few third-party crates (OSV database). The scanner writes JSON to a
+      # file; only the count and the OSV ids reach this public log, never a crate name or version. The action is a
+      # Docker container action, which runs on Linux only; the lockfile is the same on every OS, so one scan covers
+      # all three. A container action sees only the workspace (/github/workspace), so the report goes under src/
+      # (deleted with the checkout) rather than RUNNER_TEMP.
+      - name: Dependency vulnerabilities (OSV)
+        id: osv
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        with:
+          scan-args: |-
+            --lockfile=src/mpvfx-media-processing/crates/Cargo.lock
+            --format=json
+            --output=src/osv.json
+      # One vulnerability can carry several ids (aliases such as GHSA and RUSTSEC); OSV groups them, so the count is
+      # of groups and each group is one line listing its ids.
+      - name: Vulnerability ids
+        if: runner.os == 'Linux'
+        run: |
+          python3 - src/osv.json <<'PY'
+          import json, sys
+          try:
+              r = json.load(open(sys.argv[1]))
+          except (OSError, ValueError):
+              print("::error::OSV: no result file; the scan did not run"); sys.exit(1)
+          groups = set()
+          for res in r.get("results", []):
+              for p in res.get("packages", []):
+                  gs = [g.get("ids", []) for g in p.get("groups") or []] or [[v["id"]] for v in p.get("vulnerabilities", [])]
+                  groups.update(tuple(sorted(g)) for g in gs if g)
+          print(f"OSV: {len(groups)} known vulnerabilities in the dependency set")
+          for g in sorted(groups): print(f"::error::OSV {', '.join(g)} (https://osv.dev/{g[0]})")
+          sys.exit(1 if groups else 0)
+          PY
       - name: Package
         env:
           # The published libraries carry no symbols on any OS: no ELF .symtab/.debug_*, no CodeView (.pdb) record in
